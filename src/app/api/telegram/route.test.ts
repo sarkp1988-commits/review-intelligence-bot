@@ -6,41 +6,27 @@ import { POST } from './route';
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
 jest.mock('@/lib/supabase', () => ({
-  supabase: {
-    from: jest.fn(),
-  },
+  supabase: { from: jest.fn() },
 }));
 
 jest.mock('@/lib/telegram', () => ({
-  bot: {
-    api: {
-      sendMessage: jest.fn(),
-    },
-  },
+  bot: { api: { sendMessage: jest.fn() } },
 }));
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
 const VALID_SECRET = 'test-webhook-secret';
+const CHAT_ID = 12345;
+const RESTAURANT_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-const VALID_UPDATE = {
-  update_id: 100,
-  message: {
-    message_id: 1,
-    from: { id: 12345, first_name: 'Test', is_bot: false },
-    chat: { id: 12345, type: 'private' },
-    text: 'hello',
-    date: 1700000000,
-  },
-};
+// ─── Request helpers ──────────────────────────────────────────────────────────
 
 function makeRequest(body: unknown, secret?: string): NextRequest {
   const headers = new Headers({ 'content-type': 'application/json' });
   if (secret !== undefined) {
     headers.set('x-telegram-bot-api-secret-token', secret);
   }
-  const rawBody =
-    typeof body === 'string' ? body : JSON.stringify(body);
+  const rawBody = typeof body === 'string' ? body : JSON.stringify(body);
   return new NextRequest('http://localhost/api/telegram', {
     method: 'POST',
     headers,
@@ -48,86 +34,281 @@ function makeRequest(body: unknown, secret?: string): NextRequest {
   });
 }
 
+function makeUpdate(text: string, chatId = CHAT_ID) {
+  return {
+    update_id: 1,
+    message: {
+      message_id: 1,
+      from: { id: chatId, is_bot: false, first_name: 'Test' },
+      chat: { id: chatId, type: 'private' },
+      text,
+      date: 1700000000,
+    },
+  };
+}
+
+// ─── Supabase mock factory ────────────────────────────────────────────────────
+
+interface MockOptions {
+  state?: string;
+  context?: Record<string, unknown>;
+  hasRow?: boolean;
+  restaurantId?: string;
+}
+
+function setupSupabaseMocks({
+  state = 'new',
+  context = {},
+  hasRow = true,
+  restaurantId = RESTAURANT_ID,
+}: MockOptions = {}) {
+  const mockStateUpsert = jest.fn().mockResolvedValue({ data: null, error: null });
+
+  const mockRestaurantSingle = jest
+    .fn()
+    .mockResolvedValue({ data: { id: restaurantId }, error: null });
+  const mockRestaurantSelect = jest.fn().mockReturnValue({ single: mockRestaurantSingle });
+  const mockRestaurantUpsert = jest.fn().mockReturnValue({ select: mockRestaurantSelect });
+
+  (supabase.from as jest.Mock).mockImplementation((table: string) => {
+    if (table === 'conversation_state') {
+      return {
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            single: jest.fn().mockResolvedValue({
+              data: hasRow
+                ? { telegram_chat_id: CHAT_ID, state, context, restaurant_id: null, updated_at: '' }
+                : null,
+              error: hasRow ? null : { code: 'PGRST116', message: 'no rows returned' },
+            }),
+          }),
+        }),
+        upsert: mockStateUpsert,
+      };
+    }
+    if (table === 'restaurants') {
+      return { upsert: mockRestaurantUpsert };
+    }
+    return { upsert: jest.fn().mockResolvedValue({ error: null }) };
+  });
+
+  return { mockStateUpsert, mockRestaurantUpsert, mockRestaurantSingle };
+}
+
 // ─── Setup ────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
   process.env.TELEGRAM_WEBHOOK_SECRET = VALID_SECRET;
   jest.resetAllMocks();
-
-  // Default: successful Supabase upsert
-  (supabase.from as jest.Mock).mockReturnValue({
-    upsert: jest.fn().mockResolvedValue({ error: null }),
-  });
-
-  // Default: successful Telegram sendMessage
   (bot.api.sendMessage as jest.Mock).mockResolvedValue({});
 });
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-describe('POST /api/telegram', () => {
-  it('returns 200 for POST with valid secret token', async () => {
-    const req = makeRequest(VALID_UPDATE, VALID_SECRET);
-    const res = await POST(req);
-
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.ok).toBe(true);
-  });
-
-  it('returns 401 for POST with invalid secret token', async () => {
-    const req = makeRequest(VALID_UPDATE, 'wrong-secret');
-    const res = await POST(req);
-
+describe('POST /api/telegram — auth & input', () => {
+  it('returns 401 for invalid secret token', async () => {
+    const res = await POST(makeRequest(makeUpdate('hi'), 'wrong-secret'));
     expect(res.status).toBe(401);
   });
 
-  it('returns 401 for POST with missing secret token', async () => {
-    const req = makeRequest(VALID_UPDATE); // no secret header
-    const res = await POST(req);
-
+  it('returns 401 for missing secret token', async () => {
+    const res = await POST(makeRequest(makeUpdate('hi')));
     expect(res.status).toBe(401);
   });
 
-  it('returns 400 for malformed body without crashing', async () => {
-    const req = makeRequest('not-valid-json-{{{', VALID_SECRET);
-    const res = await POST(req);
-
+  it('returns 400 for malformed JSON body', async () => {
+    const res = await POST(makeRequest('{{not-json}}', VALID_SECRET));
     expect(res.status).toBe(400);
-    const body = await res.json();
-    expect(body.error).toBeDefined();
   });
 
-  it('upserts conversation_state in Supabase with correct chatId', async () => {
-    const mockUpsert = jest.fn().mockResolvedValue({ error: null });
-    (supabase.from as jest.Mock).mockReturnValue({ upsert: mockUpsert });
-
-    const req = makeRequest(VALID_UPDATE, VALID_SECRET);
-    await POST(req);
-
-    expect(supabase.from).toHaveBeenCalledWith('conversation_state');
-    expect(mockUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({ telegram_chat_id: 12345 })
-    );
-  });
-
-  it('calls bot.api.sendMessage with correct chatId', async () => {
-    const req = makeRequest(VALID_UPDATE, VALID_SECRET);
-    await POST(req);
-
-    expect(bot.api.sendMessage).toHaveBeenCalledWith(
-      12345,
-      expect.any(String),
-      expect.objectContaining({ parse_mode: 'Markdown' })
-    );
-  });
-
-  it('returns 200 without calling sendMessage when update has no message', async () => {
-    const noMessageUpdate = { update_id: 101 }; // callback_query, etc.
-    const req = makeRequest(noMessageUpdate, VALID_SECRET);
-    const res = await POST(req);
-
+  it('returns 200 silently for update with no message', async () => {
+    setupSupabaseMocks();
+    const res = await POST(makeRequest({ update_id: 1 }, VALID_SECRET));
     expect(res.status).toBe(200);
     expect(bot.api.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/telegram — state: new', () => {
+  it('asks for restaurant name and transitions state to onboarding_name', async () => {
+    const { mockStateUpsert } = setupSupabaseMocks({ hasRow: false });
+
+    const res = await POST(makeRequest(makeUpdate('hello'), VALID_SECRET));
+
+    expect(res.status).toBe(200);
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      CHAT_ID,
+      expect.stringMatching(/restaurant.*name|name.*restaurant/i),
+      expect.objectContaining({ parse_mode: 'Markdown' })
+    );
+    expect(mockStateUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telegram_chat_id: CHAT_ID,
+        state: 'onboarding_name',
+      })
+    );
+  });
+});
+
+describe('POST /api/telegram — state: onboarding_name', () => {
+  it('saves name to context, asks for city, transitions to onboarding_city', async () => {
+    const { mockStateUpsert } = setupSupabaseMocks({
+      state: 'onboarding_name',
+      context: {},
+    });
+
+    await POST(makeRequest(makeUpdate("Mario's Bistro"), VALID_SECRET));
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      CHAT_ID,
+      expect.stringMatching(/city/i),
+      expect.anything()
+    );
+    expect(mockStateUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: 'onboarding_city',
+        context: expect.objectContaining({ name: "Mario's Bistro" }),
+      })
+    );
+  });
+});
+
+describe('POST /api/telegram — state: onboarding_city', () => {
+  it('saves city to context, asks for Maps link, transitions to onboarding_link', async () => {
+    const { mockStateUpsert } = setupSupabaseMocks({
+      state: 'onboarding_city',
+      context: { name: "Mario's Bistro" },
+    });
+
+    await POST(makeRequest(makeUpdate('New York'), VALID_SECRET));
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      CHAT_ID,
+      expect.stringMatching(/maps|link|skip/i),
+      expect.anything()
+    );
+    expect(mockStateUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: 'onboarding_link',
+        context: expect.objectContaining({ name: "Mario's Bistro", city: 'New York' }),
+      })
+    );
+  });
+});
+
+describe('POST /api/telegram — state: onboarding_link', () => {
+  it('inserts restaurant, sends analysing message, transitions to processing', async () => {
+    const mapsUrl =
+      'https://www.google.com/maps/place/Marios/@40.7,-74.0/data=!1sChIJXYZ123!8m2!3d40.7';
+    const { mockStateUpsert, mockRestaurantUpsert } = setupSupabaseMocks({
+      state: 'onboarding_link',
+      context: { name: "Mario's Bistro", city: 'New York' },
+    });
+
+    const res = await POST(makeRequest(makeUpdate(mapsUrl), VALID_SECRET));
+
+    expect(res.status).toBe(200);
+    // Restaurant created
+    expect(mockRestaurantUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telegram_chat_id: CHAT_ID,
+        name: "Mario's Bistro",
+        city: 'New York',
+      }),
+      expect.anything()
+    );
+    // Sends "analysing" message
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      CHAT_ID,
+      expect.stringMatching(/analys/i),
+      expect.anything()
+    );
+    // Transitions to processing with restaurant_id
+    expect(mockStateUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: 'processing',
+        restaurant_id: RESTAURANT_ID,
+      })
+    );
+  });
+
+  it('handles "skip" — inserts restaurant with null place_id', async () => {
+    const { mockRestaurantUpsert } = setupSupabaseMocks({
+      state: 'onboarding_link',
+      context: { name: "Mario's Bistro", city: 'New York' },
+    });
+
+    await POST(makeRequest(makeUpdate('skip'), VALID_SECRET));
+
+    expect(mockRestaurantUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({ google_place_id: null }),
+      expect.anything()
+    );
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      CHAT_ID,
+      expect.stringMatching(/analys/i),
+      expect.anything()
+    );
+  });
+
+  it('extracts place_id from ?place_id= query param', async () => {
+    const urlWithParam = 'https://maps.google.com/?place_id=ChIJN1t_tDeuEmsRUsoyG83frY4';
+    const { mockRestaurantUpsert } = setupSupabaseMocks({
+      state: 'onboarding_link',
+      context: { name: "Mario's Bistro", city: 'New York' },
+    });
+
+    await POST(makeRequest(makeUpdate(urlWithParam), VALID_SECRET));
+
+    expect(mockRestaurantUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({ google_place_id: 'ChIJN1t_tDeuEmsRUsoyG83frY4' }),
+      expect.anything()
+    );
+  });
+
+  it('extracts place_id from !1s encoding in full Maps URL', async () => {
+    const fullMapsUrl =
+      'https://www.google.com/maps/place/Name/@40.7,-74.0/data=!1sChIJABC987!4m5';
+    const { mockRestaurantUpsert } = setupSupabaseMocks({
+      state: 'onboarding_link',
+      context: { name: "Mario's Bistro", city: 'New York' },
+    });
+
+    await POST(makeRequest(makeUpdate(fullMapsUrl), VALID_SECRET));
+
+    expect(mockRestaurantUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({ google_place_id: 'ChIJABC987' }),
+      expect.anything()
+    );
+  });
+});
+
+describe('POST /api/telegram — state: processing', () => {
+  it('sends a "still working" message without changing state', async () => {
+    const { mockStateUpsert } = setupSupabaseMocks({
+      state: 'processing',
+      context: {},
+    });
+
+    const res = await POST(makeRequest(makeUpdate('are you done?'), VALID_SECRET));
+
+    expect(res.status).toBe(200);
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      CHAT_ID,
+      expect.stringMatching(/analys|ready|report/i),
+      expect.anything()
+    );
+    // State should NOT be changed during processing
+    expect(mockStateUpsert).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/telegram — state: idle', () => {
+  it('returns 200 without crashing (intent router wired in later slice)', async () => {
+    setupSupabaseMocks({ state: 'idle', context: {} });
+
+    const res = await POST(makeRequest(makeUpdate('Show me complaints'), VALID_SECRET));
+
+    expect(res.status).toBe(200);
   });
 });

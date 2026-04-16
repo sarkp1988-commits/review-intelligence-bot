@@ -89,9 +89,8 @@ export interface ConversationState {
     | 'new'
     | 'onboarding_name'
     | 'onboarding_city'
-    | 'onboarding_email'
-    | 'onboarding_place_search'
-    | 'onboarding_place_confirm'
+    | 'onboarding_link'
+    | 'processing'
     | 'idle';
   context: Record<string, unknown>;
   updated_at: string;
