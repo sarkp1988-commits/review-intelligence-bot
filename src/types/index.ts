@@ -100,35 +100,48 @@ export interface ConversationState {
 // ─── Supabase Database type map ───────────────────────────────────────────────
 // Used to type the Supabase client generically.
 
+// Named interfaces (above) are for application code.
+// The Database type must satisfy Supabase's GenericSchema / GenericTable constraints,
+// which require Row/Insert/Update to extend Record<string, unknown>.
+// TypeScript named interfaces don't implicitly satisfy index-signature types, so we
+// intersect with Record<string, unknown> here. This is structural-only — no runtime cost.
 export interface Database {
   public: {
     Tables: {
       restaurants: {
-        Row: Restaurant;
-        Insert: Omit<Restaurant, 'id' | 'onboarded_at'>;
-        Update: Partial<Omit<Restaurant, 'id'>>;
+        Row: Restaurant & Record<string, unknown>;
+        Insert: Omit<Restaurant, 'id' | 'onboarded_at'> & Record<string, unknown>;
+        Update: Partial<Omit<Restaurant, 'id'>> & Record<string, unknown>;
+        Relationships: [];
       };
       reviews: {
-        Row: Review;
-        Insert: Omit<Review, 'id' | 'fetched_at'>;
-        Update: Partial<Omit<Review, 'id'>>;
+        Row: Review & Record<string, unknown>;
+        Insert: Omit<Review, 'id' | 'fetched_at'> & Record<string, unknown>;
+        Update: Partial<Omit<Review, 'id'>> & Record<string, unknown>;
+        Relationships: [];
       };
       drafts: {
-        Row: Draft;
-        Insert: Omit<Draft, 'id' | 'created_at'>;
-        Update: Partial<Omit<Draft, 'id'>>;
+        Row: Draft & Record<string, unknown>;
+        Insert: Omit<Draft, 'id' | 'created_at'> & Record<string, unknown>;
+        Update: Partial<Omit<Draft, 'id'>> & Record<string, unknown>;
+        Relationships: [];
       };
       restaurant_profiles: {
-        Row: RestaurantProfile;
-        Insert: Omit<RestaurantProfile, 'id' | 'created_at'>;
-        Update: Partial<Omit<RestaurantProfile, 'id'>>;
+        Row: RestaurantProfile & Record<string, unknown>;
+        Insert: Omit<RestaurantProfile, 'id' | 'created_at'> & Record<string, unknown>;
+        Update: Partial<Omit<RestaurantProfile, 'id'>> & Record<string, unknown>;
+        Relationships: [];
       };
       conversation_state: {
-        Row: ConversationState;
-        Insert: ConversationState;
-        Update: Partial<ConversationState>;
+        Row: ConversationState & Record<string, unknown>;
+        Insert: ConversationState & Record<string, unknown>;
+        Update: Partial<ConversationState> & Record<string, unknown>;
+        Relationships: [];
       };
     };
+    // Required by GenericSchema — no views or functions in MVP
+    Views: Record<string, never>;
+    Functions: Record<string, never>;
   };
 }
 
