@@ -89,9 +89,8 @@ export interface ConversationState {
     | 'new'
     | 'onboarding_name'
     | 'onboarding_city'
-    | 'onboarding_email'
-    | 'onboarding_place_search'
-    | 'onboarding_place_confirm'
+    | 'onboarding_link'
+    | 'processing'
     | 'idle';
   context: Record<string, unknown>;
   updated_at: string;
@@ -110,7 +109,11 @@ export interface Database {
     Tables: {
       restaurants: {
         Row: Restaurant & Record<string, unknown>;
-        Insert: Omit<Restaurant, 'id' | 'onboarded_at'> & Record<string, unknown>;
+        // Fields with DB defaults or nullable-no-default are optional on insert.
+        // Required: telegram_chat_id, name, city, google_place_id
+        Insert: Omit<Restaurant, 'id' | 'onboarded_at' | 'email' | 'last_crawled_at' | 'status' | 'timezone'>
+          & Partial<Pick<Restaurant, 'email' | 'last_crawled_at' | 'status' | 'timezone'>>
+          & Record<string, unknown>;
         Update: Partial<Omit<Restaurant, 'id'>> & Record<string, unknown>;
         Relationships: [];
       };

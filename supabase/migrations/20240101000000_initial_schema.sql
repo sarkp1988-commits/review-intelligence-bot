@@ -81,9 +81,8 @@ create table conversation_state (
     'new',
     'onboarding_name',
     'onboarding_city',
-    'onboarding_email',
-    'onboarding_place_search',
-    'onboarding_place_confirm',
+    'onboarding_link',
+    'processing',
     'idle'
   )),
   context          jsonb default '{}',
