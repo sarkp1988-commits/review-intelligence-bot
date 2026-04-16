@@ -1,7 +1,12 @@
 import { NextRequest } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { bot } from '@/lib/telegram';
+import { runAnalystAgent } from '@/agents/analyst';
+import { runDrafterAgent } from '@/agents/drafter';
+import { fetchReviews } from '@/lib/places';
+import { saveReviews, updateLastCrawledAt } from '@/agents/review-fetcher';
 import { POST } from './route';
+import type { Review } from '@/types';
 
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
@@ -13,11 +18,31 @@ jest.mock('@/lib/telegram', () => ({
   bot: { api: { sendMessage: jest.fn() } },
 }));
 
+// Default: return no reviews — existing tests are unaffected, pipeline is a no-op
+jest.mock('@/lib/places', () => ({
+  fetchReviews: jest.fn().mockResolvedValue([]),
+}));
+
+jest.mock('@/agents/review-fetcher', () => ({
+  saveReviews: jest.fn().mockResolvedValue(undefined),
+  updateLastCrawledAt: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('@/agents/analyst', () => ({
+  runAnalystAgent: jest.fn().mockResolvedValue({ reviews: [] }),
+}));
+
+jest.mock('@/agents/drafter', () => ({
+  runDrafterAgent: jest.fn().mockResolvedValue('Thank you for your review!'),
+}));
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const VALID_SECRET = 'test-webhook-secret';
 const CHAT_ID = 12345;
 const RESTAURANT_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+const DRAFT_ID = 'dddddddd-eeee-ffff-aaaa-bbbbbbbbbbbb';
+const PLACE_ID = 'ChIJN1t_tDeuEmsRUsoyG83frY4';
 
 // ─── Request helpers ──────────────────────────────────────────────────────────
 
@@ -54,6 +79,7 @@ interface MockOptions {
   context?: Record<string, unknown>;
   hasRow?: boolean;
   restaurantId?: string;
+  savedReviews?: Review[];
 }
 
 function setupSupabaseMocks({
@@ -61,6 +87,7 @@ function setupSupabaseMocks({
   context = {},
   hasRow = true,
   restaurantId = RESTAURANT_ID,
+  savedReviews = [],
 }: MockOptions = {}) {
   const mockStateUpsert = jest.fn().mockResolvedValue({ data: null, error: null });
 
@@ -69,6 +96,18 @@ function setupSupabaseMocks({
     .mockResolvedValue({ data: { id: restaurantId }, error: null });
   const mockRestaurantSelect = jest.fn().mockReturnValue({ single: mockRestaurantSingle });
   const mockRestaurantUpsert = jest.fn().mockReturnValue({ select: mockRestaurantSelect });
+
+  // reviews: select().eq() and update().eq().eq()
+  const mockReviewsEq = jest.fn().mockResolvedValue({ data: savedReviews, error: null });
+  const mockReviewsSelect = jest.fn().mockReturnValue({ eq: mockReviewsEq });
+  const mockReviewsUpdateEq2 = jest.fn().mockResolvedValue({ error: null });
+  const mockReviewsUpdateEq1 = jest.fn().mockReturnValue({ eq: mockReviewsUpdateEq2 });
+  const mockReviewsUpdate = jest.fn().mockReturnValue({ eq: mockReviewsUpdateEq1 });
+
+  // drafts: insert().select().single()
+  const mockDraftsSingle = jest.fn().mockResolvedValue({ data: { id: DRAFT_ID }, error: null });
+  const mockDraftsSelect = jest.fn().mockReturnValue({ single: mockDraftsSingle });
+  const mockDraftsInsert = jest.fn().mockReturnValue({ select: mockDraftsSelect });
 
   (supabase.from as jest.Mock).mockImplementation((table: string) => {
     if (table === 'conversation_state') {
@@ -89,10 +128,22 @@ function setupSupabaseMocks({
     if (table === 'restaurants') {
       return { upsert: mockRestaurantUpsert };
     }
+    if (table === 'reviews') {
+      return { select: mockReviewsSelect, update: mockReviewsUpdate };
+    }
+    if (table === 'drafts') {
+      return { insert: mockDraftsInsert };
+    }
     return { upsert: jest.fn().mockResolvedValue({ error: null }) };
   });
 
-  return { mockStateUpsert, mockRestaurantUpsert, mockRestaurantSingle };
+  return {
+    mockStateUpsert,
+    mockRestaurantUpsert,
+    mockRestaurantSingle,
+    mockDraftsInsert,
+    mockDraftsSingle,
+  };
 }
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
@@ -101,6 +152,12 @@ beforeEach(() => {
   process.env.TELEGRAM_WEBHOOK_SECRET = VALID_SECRET;
   jest.resetAllMocks();
   (bot.api.sendMessage as jest.Mock).mockResolvedValue({});
+  // Re-apply defaults after resetAllMocks
+  (fetchReviews as jest.Mock).mockResolvedValue([]);
+  (saveReviews as jest.Mock).mockResolvedValue(undefined);
+  (updateLastCrawledAt as jest.Mock).mockResolvedValue(undefined);
+  (runAnalystAgent as jest.Mock).mockResolvedValue({ reviews: [] });
+  (runDrafterAgent as jest.Mock).mockResolvedValue('Thank you for your review!');
 });
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -208,7 +265,6 @@ describe('POST /api/telegram — state: onboarding_link', () => {
     const res = await POST(makeRequest(makeUpdate(mapsUrl), VALID_SECRET));
 
     expect(res.status).toBe(200);
-    // Restaurant created
     expect(mockRestaurantUpsert).toHaveBeenCalledWith(
       expect.objectContaining({
         telegram_chat_id: CHAT_ID,
@@ -217,13 +273,11 @@ describe('POST /api/telegram — state: onboarding_link', () => {
       }),
       expect.anything()
     );
-    // Sends "analysing" message
     expect(bot.api.sendMessage).toHaveBeenCalledWith(
       CHAT_ID,
       expect.stringMatching(/analys/i),
       expect.anything()
     );
-    // Transitions to processing with restaurant_id
     expect(mockStateUpsert).toHaveBeenCalledWith(
       expect.objectContaining({
         state: 'processing',
@@ -252,7 +306,7 @@ describe('POST /api/telegram — state: onboarding_link', () => {
   });
 
   it('extracts place_id from ?place_id= query param', async () => {
-    const urlWithParam = 'https://maps.google.com/?place_id=ChIJN1t_tDeuEmsRUsoyG83frY4';
+    const urlWithParam = `https://maps.google.com/?place_id=${PLACE_ID}`;
     const { mockRestaurantUpsert } = setupSupabaseMocks({
       state: 'onboarding_link',
       context: { name: "Mario's Bistro", city: 'New York' },
@@ -261,7 +315,7 @@ describe('POST /api/telegram — state: onboarding_link', () => {
     await POST(makeRequest(makeUpdate(urlWithParam), VALID_SECRET));
 
     expect(mockRestaurantUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({ google_place_id: 'ChIJN1t_tDeuEmsRUsoyG83frY4' }),
+      expect.objectContaining({ google_place_id: PLACE_ID }),
       expect.anything()
     );
   });
@@ -283,6 +337,161 @@ describe('POST /api/telegram — state: onboarding_link', () => {
   });
 });
 
+describe('POST /api/telegram — AI pipeline (onboarding_link with place_id)', () => {
+  const MAPS_URL = `https://maps.google.com/?place_id=${PLACE_ID}`;
+
+  const SAVED_REVIEW: Review = {
+    id: 'rev-1',
+    restaurant_id: RESTAURANT_ID,
+    platform: 'google',
+    external_id: 'Alice_1700000000',
+    author: 'Alice',
+    stars: 5,
+    body: 'Amazing food!',
+    review_date: '2023-11-14T00:00:00.000Z',
+    sentiment: null,
+    sentiment_score: null,
+    topics: null,
+    is_competitor: false,
+    competitor_name: null,
+    fetched_at: '2023-11-14T01:00:00.000Z',
+  };
+
+  beforeEach(() => {
+    // Return one review from Places and one from DB for pipeline tests
+    (fetchReviews as jest.Mock).mockResolvedValue([
+      { author_name: 'Alice', rating: 5, text: 'Amazing food!', time: 1700000000, relative_time_description: 'a week ago' },
+    ]);
+    (runAnalystAgent as jest.Mock).mockResolvedValue({
+      reviews: [{ external_id: 'Alice_1700000000', sentiment: 'positive', sentiment_score: 0.9, topics: ['food'] }],
+    });
+    (runDrafterAgent as jest.Mock).mockResolvedValue('Thank you, Alice!');
+  });
+
+  it('calls fetchReviews with the extracted place_id', async () => {
+    setupSupabaseMocks({
+      state: 'onboarding_link',
+      context: { name: "Mario's Bistro", city: 'New York' },
+      savedReviews: [SAVED_REVIEW],
+    });
+
+    await POST(makeRequest(makeUpdate(MAPS_URL), VALID_SECRET));
+
+    expect(fetchReviews).toHaveBeenCalledWith(PLACE_ID);
+  });
+
+  it('calls saveReviews with restaurantId and fetched reviews', async () => {
+    setupSupabaseMocks({
+      state: 'onboarding_link',
+      context: { name: "Mario's Bistro", city: 'New York' },
+      savedReviews: [SAVED_REVIEW],
+    });
+
+    await POST(makeRequest(makeUpdate(MAPS_URL), VALID_SECRET));
+
+    expect(saveReviews).toHaveBeenCalledWith(
+      RESTAURANT_ID,
+      expect.arrayContaining([expect.objectContaining({ author_name: 'Alice' })])
+    );
+  });
+
+  it('runs the analyst agent on saved reviews', async () => {
+    setupSupabaseMocks({
+      state: 'onboarding_link',
+      context: { name: "Mario's Bistro", city: 'New York' },
+      savedReviews: [SAVED_REVIEW],
+    });
+
+    await POST(makeRequest(makeUpdate(MAPS_URL), VALID_SECRET));
+
+    expect(runAnalystAgent).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ id: 'rev-1' })]),
+      expect.objectContaining({ name: "Mario's Bistro", city: 'New York' })
+    );
+  });
+
+  it('runs the drafter agent for each review and saves a draft', async () => {
+    setupSupabaseMocks({
+      state: 'onboarding_link',
+      context: { name: "Mario's Bistro", city: 'New York' },
+      savedReviews: [SAVED_REVIEW],
+    });
+
+    await POST(makeRequest(makeUpdate(MAPS_URL), VALID_SECRET));
+
+    expect(runDrafterAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'rev-1' }),
+      expect.objectContaining({ name: "Mario's Bistro", city: 'New York' })
+    );
+  });
+
+  it('sends each draft as a Telegram message with Approve/Edit/Skip inline buttons', async () => {
+    setupSupabaseMocks({
+      state: 'onboarding_link',
+      context: { name: "Mario's Bistro", city: 'New York' },
+      savedReviews: [SAVED_REVIEW],
+    });
+
+    await POST(makeRequest(makeUpdate(MAPS_URL), VALID_SECRET));
+
+    // At least one sendMessage call must include inline_keyboard buttons
+    const calls = (bot.api.sendMessage as jest.Mock).mock.calls as unknown[][];
+    const draftCall = calls.find((args) => {
+      const opts = args[2] as Record<string, unknown> | undefined;
+      if (!opts) return false;
+      const rm = opts.reply_markup as Record<string, unknown> | undefined;
+      return Array.isArray(rm?.inline_keyboard);
+    });
+    expect(draftCall).toBeDefined();
+
+    const opts = draftCall![2] as { reply_markup: { inline_keyboard: { callback_data: string }[][] } };
+    const buttons = opts.reply_markup.inline_keyboard.flat();
+    expect(buttons.some((b) => b.callback_data.startsWith('approve:'))).toBe(true);
+    expect(buttons.some((b) => b.callback_data.startsWith('edit:'))).toBe(true);
+    expect(buttons.some((b) => b.callback_data.startsWith('skip:'))).toBe(true);
+  });
+
+  it('transitions state to idle after pipeline completes', async () => {
+    const { mockStateUpsert } = setupSupabaseMocks({
+      state: 'onboarding_link',
+      context: { name: "Mario's Bistro", city: 'New York' },
+      savedReviews: [SAVED_REVIEW],
+    });
+
+    await POST(makeRequest(makeUpdate(MAPS_URL), VALID_SECRET));
+
+    expect(mockStateUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'idle', restaurant_id: RESTAURANT_ID })
+    );
+  });
+
+  it('skips pipeline but transitions to idle when no place_id provided', async () => {
+    const { mockStateUpsert } = setupSupabaseMocks({
+      state: 'onboarding_link',
+      context: { name: "Mario's Bistro", city: 'New York' },
+    });
+
+    await POST(makeRequest(makeUpdate('skip'), VALID_SECRET));
+
+    expect(fetchReviews).not.toHaveBeenCalled();
+    expect(mockStateUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'idle' })
+    );
+  });
+
+  it('calls updateLastCrawledAt after a successful pipeline run', async () => {
+    setupSupabaseMocks({
+      state: 'onboarding_link',
+      context: { name: "Mario's Bistro", city: 'New York' },
+      savedReviews: [SAVED_REVIEW],
+    });
+
+    await POST(makeRequest(makeUpdate(MAPS_URL), VALID_SECRET));
+
+    expect(updateLastCrawledAt).toHaveBeenCalledWith(RESTAURANT_ID);
+  });
+});
+
 describe('POST /api/telegram — state: processing', () => {
   it('sends a "still working" message without changing state', async () => {
     const { mockStateUpsert } = setupSupabaseMocks({
@@ -298,7 +507,6 @@ describe('POST /api/telegram — state: processing', () => {
       expect.stringMatching(/analys|ready|report/i),
       expect.anything()
     );
-    // State should NOT be changed during processing
     expect(mockStateUpsert).not.toHaveBeenCalled();
   });
 });

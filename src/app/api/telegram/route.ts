@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { InlineKeyboard } from 'grammy';
 import { supabase } from '@/lib/supabase';
 import { bot } from '@/lib/telegram';
+import { fetchReviews } from '@/lib/places';
+import { saveReviews, updateLastCrawledAt } from '@/agents/review-fetcher';
+import { runAnalystAgent } from '@/agents/analyst';
+import { runDrafterAgent } from '@/agents/drafter';
+import { MODELS } from '@/lib/config';
+import type { Review, Draft, AnalystOutput } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -20,7 +27,7 @@ interface StateRow {
   updated_at: string;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── DB helpers ───────────────────────────────────────────────────────────────
 
 async function loadState(chatId: number): Promise<StateRow | null> {
   const { data, error } = await supabase
@@ -28,7 +35,6 @@ async function loadState(chatId: number): Promise<StateRow | null> {
     .select()
     .eq('telegram_chat_id', chatId)
     .single();
-
   if (error) return null;
   return data as StateRow;
 }
@@ -48,8 +54,38 @@ async function saveState(
   });
 }
 
+// ─── Telegram helpers ─────────────────────────────────────────────────────────
+
+function send(chatId: number, text: string): Promise<unknown> {
+  return bot.api.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+}
+
+async function sendDraftMessage(
+  chatId: number,
+  review: Review,
+  draftText: string,
+  draftId: string
+): Promise<void> {
+  const stars = '⭐'.repeat(review.stars ?? 0);
+  const caption =
+    `*${review.author ?? 'Guest'}* ${stars}\n` +
+    `_"${review.body ?? ''}"_\n\n` +
+    `*Suggested reply:*\n${draftText}`;
+
+  const keyboard = new InlineKeyboard()
+    .text('✅ Approve', `approve:${draftId}`)
+    .text('✏️ Edit', `edit:${draftId}`)
+    .text('⏭️ Skip', `skip:${draftId}`);
+
+  await bot.api.sendMessage(chatId, caption, {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard,
+  });
+}
+
+// ─── Place ID extraction ──────────────────────────────────────────────────────
+
 function extractPlaceId(text: string): string | null {
-  // ?place_id=... query parameter
   try {
     const url = new URL(text);
     const paramId = url.searchParams.get('place_id');
@@ -57,16 +93,75 @@ function extractPlaceId(text: string): string | null {
   } catch {
     // not a valid URL — fall through
   }
-
-  // !1sChIJ... encoding in full Maps URLs
   const match = /!1s(ChIJ[^!&\s]+)/.exec(text);
-  if (match) return match[1];
-
-  return null;
+  return match ? match[1] : null;
 }
 
-function send(chatId: number, text: string): Promise<unknown> {
-  return bot.api.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+// ─── AI pipeline ──────────────────────────────────────────────────────────────
+
+async function applyAnalysis(
+  restaurantId: string,
+  analysis: AnalystOutput
+): Promise<void> {
+  for (const result of analysis.reviews) {
+    await supabase
+      .from('reviews')
+      .update({ sentiment: result.sentiment, sentiment_score: result.sentiment_score, topics: result.topics })
+      .eq('restaurant_id', restaurantId)
+      .eq('external_id', result.external_id);
+  }
+}
+
+async function draftAndSend(
+  chatId: number,
+  restaurantId: string,
+  reviews: Review[],
+  restaurant: { name: string; city: string }
+): Promise<void> {
+  for (const review of reviews) {
+    const draftText = await runDrafterAgent(review, restaurant);
+
+    const { data } = await supabase
+      .from('drafts')
+      .insert({
+        restaurant_id: restaurantId,
+        review_id: review.id,
+        original_draft: draftText,
+        action: 'pending' as const,
+        model_used: MODELS.HAIKU,
+        final_text: null,
+        edit_distance: null,
+        actioned_at: null,
+      })
+      .select()
+      .single();
+
+    if (data) {
+      await sendDraftMessage(chatId, review, draftText, (data as Draft).id);
+    }
+  }
+}
+
+async function runOnboardingPipeline(
+  chatId: number,
+  restaurantId: string,
+  placeId: string,
+  restaurant: { name: string; city: string }
+): Promise<void> {
+  const placeReviews = await fetchReviews(placeId);
+  await saveReviews(restaurantId, placeReviews);
+
+  const { data: reviews } = await supabase
+    .from('reviews')
+    .select()
+    .eq('restaurant_id', restaurantId);
+
+  if (!reviews?.length) return;
+
+  const analysis = await runAnalystAgent(reviews as Review[], restaurant);
+  await applyAnalysis(restaurantId, analysis);
+  await draftAndSend(chatId, restaurantId, reviews as Review[], restaurant);
+  await updateLastCrawledAt(restaurantId);
 }
 
 // ─── State handlers ───────────────────────────────────────────────────────────
@@ -84,8 +179,7 @@ async function handleOnboardingName(
   text: string,
   ctx: Record<string, unknown>
 ): Promise<void> {
-  const newCtx = { ...ctx, name: text };
-  await saveState(chatId, 'onboarding_city', newCtx);
+  await saveState(chatId, 'onboarding_city', { ...ctx, name: text });
   await send(chatId, 'Great! Which city is your restaurant in?');
 }
 
@@ -94,8 +188,7 @@ async function handleOnboardingCity(
   text: string,
   ctx: Record<string, unknown>
 ): Promise<void> {
-  const newCtx = { ...ctx, city: text };
-  await saveState(chatId, 'onboarding_link', newCtx);
+  await saveState(chatId, 'onboarding_link', { ...ctx, city: text });
   await send(
     chatId,
     'Almost there! Please share your Google Maps link, or type *skip* to continue without one.'
@@ -127,6 +220,15 @@ async function handleOnboardingLink(
 
   await saveState(chatId, 'processing', {}, restaurantId);
   await send(chatId, 'Got it! Analysing your reviews now — this may take a minute.');
+
+  if (placeId && restaurantId) {
+    await runOnboardingPipeline(chatId, restaurantId, placeId, {
+      name: ctx.name as string,
+      city: ctx.city as string,
+    });
+  }
+
+  await saveState(chatId, 'idle', {}, restaurantId);
 }
 
 async function handleProcessing(chatId: number): Promise<void> {
@@ -145,8 +247,6 @@ async function handleIdle(
 
 async function dispatch(chatId: number, text: string): Promise<void> {
   const row = await loadState(chatId);
-
-  // No row ⇒ brand-new user
   const state: ConversationStateValue = row?.state ?? 'new';
   const ctx: Record<string, unknown> = row?.context ?? {};
 
@@ -175,13 +275,11 @@ async function dispatch(chatId: number, text: string): Promise<void> {
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  // 1. Authenticate — read at request time so tests can set env before each call
   const incomingSecret = req.headers.get('x-telegram-bot-api-secret-token');
   if (!incomingSecret || incomingSecret !== process.env.TELEGRAM_WEBHOOK_SECRET) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  // 2. Parse body
   let update: Record<string, unknown>;
   try {
     update = (await req.json()) as Record<string, unknown>;
@@ -189,7 +287,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Bad request' }, { status: 400 });
   }
 
-  // 3. Extract message — ignore non-message updates (callback queries, etc.)
   const message = update.message as
     | { chat?: { id?: number }; text?: string }
     | undefined;
@@ -199,10 +296,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true }, { status: 200 });
   }
 
-  const text = message?.text ?? '';
-
-  // 4. Dispatch to state machine
-  await dispatch(chatId, text);
+  await dispatch(chatId, message?.text ?? '');
 
   return NextResponse.json({ ok: true }, { status: 200 });
 }
