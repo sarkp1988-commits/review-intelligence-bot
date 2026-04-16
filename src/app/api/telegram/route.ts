@@ -37,18 +37,15 @@ async function saveState(
   chatId: number,
   state: ConversationStateValue,
   context: Record<string, unknown>,
-  restaurantId?: string | null
+  restaurantId: string | null = null
 ): Promise<void> {
-  const row: Record<string, unknown> = {
+  await supabase.from('conversation_state').upsert({
     telegram_chat_id: chatId,
     state,
     context,
+    restaurant_id: restaurantId,
     updated_at: new Date().toISOString(),
-  };
-  if (restaurantId !== undefined) {
-    row.restaurant_id = restaurantId;
-  }
-  await supabase.from('conversation_state').upsert(row);
+  });
 }
 
 function extractPlaceId(text: string): string | null {
