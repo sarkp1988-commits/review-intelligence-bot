@@ -19,7 +19,8 @@ type ConversationStateValue =
   | 'onboarding_city'
   | 'onboarding_link'
   | 'processing'
-  | 'idle';
+  | 'idle'
+  | 'awaiting_edit';
 
 interface StateRow {
   telegram_chat_id: number;
