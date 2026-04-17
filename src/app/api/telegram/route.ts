@@ -1,3 +1,5 @@
+import { handleCallbackQuery, handleEditReply } from '@/lib/bot/callbackHandler';
+import { routeIntent } from '@/lib/bot/intentRouter';
 import { NextRequest, NextResponse } from 'next/server';
 import { InlineKeyboard } from 'grammy';
 import { supabase } from '@/lib/supabase';
@@ -301,32 +303,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   return NextResponse.json({ ok: true }, { status: 200 });
 }
 
-
-// ── Slice 5: callback_query handler (Approve / Edit / Skip) ──────────────────
-
+// ── Slice 5: callback_query handler (Approve / Edit / Skip) ──
 bot.on('callback_query:data', async (ctx) => {
   await handleCallbackQuery(ctx);
 });
 
-// Free-text intent routing for awaiting_edit state
+// Free-text intent routing
 bot.on('message:text', async (ctx, next) => {
   const session = await getSession(ctx.chat.id);
   if (session?.state === 'awaiting_edit' && session?.pending_draft_id) {
     const intent = await routeIntent(ctx.message.text);
     if (intent === 'approve') {
-      await handleCallbackQuery(
-        Object.assign(ctx, { callbackQuery: { data: 'approve:' + session.pending_draft_id } })
-      );
+      await handleCallbackQuery(Object.assign(ctx, { callbackQuery: { data: 'approve:' + session.pending_draft_id } }));
     } else if (intent === 'skip') {
-      await handleCallbackQuery(
-        Object.assign(ctx, { callbackQuery: { data: 'skip:' + session.pending_draft_id } })
-      );
+      await handleCallbackQuery(Object.assign(ctx, { callbackQuery: { data: 'skip:' + session.pending_draft_id } }));
     } else if (intent === 'edit' || ctx.message.text.length > 20) {
       await handleEditReply(ctx, session.pending_draft_id, session.original_draft ?? '', ctx.message.text);
-    } else {
-      return next();
-    }
-  } else {
-    return next();
-  }
+    } else { return next(); }
+  } else { return next(); }
 });
