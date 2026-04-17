@@ -308,17 +308,23 @@ bot.on('callback_query:data', async (ctx) => {
   await handleCallbackQuery(ctx);
 });
 
-// Free-text intent routing
+// Free-text intent routing for awaiting_edit state
 bot.on('message:text', async (ctx, next) => {
-  const session = await getSession(ctx.chat.id);
-  if (session?.state === 'awaiting_edit' && session?.pending_draft_id) {
+  const session = await loadState(ctx.chat.id);
+  if (session?.state === 'awaiting_edit' && session?.context?.pending_draft_id) {
+    const pendingId = session.context.pending_draft_id as string;
+    const originalDraft = (session.context.original_draft as string) ?? '';
     const intent = await routeIntent(ctx.message.text);
     if (intent === 'approve') {
-      await handleCallbackQuery(Object.assign(ctx, { callbackQuery: { data: 'approve:' + session.pending_draft_id } }));
+      await handleCallbackQuery(Object.assign({}, ctx, { callbackQuery: { data: 'approve:' + pendingId } }) as any);
     } else if (intent === 'skip') {
-      await handleCallbackQuery(Object.assign(ctx, { callbackQuery: { data: 'skip:' + session.pending_draft_id } }));
+      await handleCallbackQuery(Object.assign({}, ctx, { callbackQuery: { data: 'skip:' + pendingId } }) as any);
     } else if (intent === 'edit' || ctx.message.text.length > 20) {
-      await handleEditReply(ctx, session.pending_draft_id, session.original_draft ?? '', ctx.message.text);
-    } else { return next(); }
-  } else { return next(); }
+      await handleEditReply(ctx, pendingId, originalDraft, ctx.message.text);
+    } else {
+      return next();
+    }
+  } else {
+    return next();
+  }
 });
