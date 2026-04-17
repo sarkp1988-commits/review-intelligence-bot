@@ -1,15 +1,18 @@
 // Bot Engineer Agent — Slice 5 (Issue #6)
-// TDD: tests written BEFORE feature code — intentRouter unit tests
-
-import { routeIntent, Intent } from '@/lib/bot/intentRouter';
-import Anthropic from '@anthropic-ai/sdk';
-
-jest.mock('@anthropic-ai/sdk');
+// TDD: intentRouter unit tests
 
 const mockCreate = jest.fn();
-(Anthropic as jest.Mock).mockImplementation(() => ({
-  messages: { create: mockCreate },
-}));
+
+jest.mock('@anthropic-ai/sdk', () => {
+  return {
+    __esModule: true,
+    default: jest.fn().mockImplementation(() => ({
+      messages: { create: mockCreate },
+    })),
+  };
+});
+
+import { routeIntent } from '@/lib/bot/intentRouter';
 
 function mockHaiku(intent: string) {
   mockCreate.mockResolvedValue({
@@ -20,47 +23,47 @@ function mockHaiku(intent: string) {
 beforeEach(() => jest.clearAllMocks());
 
 describe('routeIntent', () => {
-  test('routes "yes" → approve', async () => {
+  test('routes "yes" to approve', async () => {
     mockHaiku('approve');
     expect(await routeIntent('yes')).toBe('approve');
   });
 
-  test('routes "looks good" → approve', async () => {
+  test('routes "looks good" to approve', async () => {
     mockHaiku('approve');
     expect(await routeIntent('looks good')).toBe('approve');
   });
 
-  test('routes "no" → skip', async () => {
+  test('routes "no" to skip', async () => {
     mockHaiku('skip');
     expect(await routeIntent('no')).toBe('skip');
   });
 
-  test('routes "next" → skip', async () => {
+  test('routes "next" to skip', async () => {
     mockHaiku('skip');
     expect(await routeIntent('next')).toBe('skip');
   });
 
-  test('routes "edit" → edit', async () => {
+  test('routes "edit" to edit', async () => {
     mockHaiku('edit');
     expect(await routeIntent('edit')).toBe('edit');
   });
 
-  test('routes "try again" → regenerate', async () => {
+  test('routes "try again" to regenerate', async () => {
     mockHaiku('regenerate');
     expect(await routeIntent('try again')).toBe('regenerate');
   });
 
-  test('routes "help" → help', async () => {
+  test('routes "help" to help', async () => {
     mockHaiku('help');
     expect(await routeIntent('help')).toBe('help');
   });
 
-  test('unrecognised Haiku output → unknown', async () => {
+  test('unrecognised Haiku output returns unknown', async () => {
     mockHaiku('banana');
     expect(await routeIntent('what is this')).toBe('unknown');
   });
 
-  test('empty string Haiku output → unknown', async () => {
+  test('empty Haiku output returns unknown', async () => {
     mockHaiku('');
     expect(await routeIntent('???')).toBe('unknown');
   });
