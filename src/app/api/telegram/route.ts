@@ -305,8 +305,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
 // ── Slice 5: callback_query handler (Approve / Edit / Skip) ──
 bot.on('callback_query:data', async (ctx) => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await handleCallbackQuery(ctx as any);
+  await handleCallbackQuery(ctx);
 });
 
 // Free-text intent routing for awaiting_edit state
