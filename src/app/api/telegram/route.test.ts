@@ -15,7 +15,7 @@ jest.mock('@/lib/supabase', () => ({
 }));
 
 jest.mock('@/lib/telegram', () => ({
-  bot: { api: { sendMessage: jest.fn() } },
+  bot: { api: { sendMessage: jest.fn() }, on: jest.fn(), start: jest.fn() },
 }));
 
 // Default: return no reviews — existing tests are unaffected, pipeline is a no-op
