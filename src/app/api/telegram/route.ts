@@ -19,8 +19,7 @@ type ConversationStateValue =
   | 'onboarding_city'
   | 'onboarding_link'
   | 'processing'
-  | 'idle'
-  | 'awaiting_edit';
+  | 'idle';
 
 interface StateRow {
   telegram_chat_id: number;
@@ -312,7 +311,7 @@ bot.on('callback_query:data', async (ctx) => {
 // Free-text intent routing for awaiting_edit state
 bot.on('message:text', async (ctx, next) => {
   const session = await loadState(ctx.chat.id);
-  if (session?.state === 'awaiting_edit' && session?.context?.pending_draft_id) {
+  if ((session?.state as string) === 'awaiting_edit' && session?.context?.pending_draft_id) {
     const pendingId = session.context.pending_draft_id as string;
     const originalDraft = (session.context.original_draft as string) ?? '';
     const intent = await routeIntent(ctx.message.text);
