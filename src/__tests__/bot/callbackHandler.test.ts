@@ -1,15 +1,15 @@
 // Bot Engineer Agent — Slice 5 (Issue #6)
 // TDD: callbackHandler unit tests
 
-// Mock Supabase BEFORE any imports that use it
-jest.mock('@supabase/supabase-js', () => ({
-  createClient: jest.fn(() => ({
+// Mock @/lib/supabase BEFORE imports (callbackHandler uses the shared singleton)
+jest.mock('@/lib/supabase', () => ({
+  supabase: {
     from: jest.fn(() => ({
       update: jest.fn(() => ({
         eq: jest.fn(() => Promise.resolve({ error: null })),
       })),
     })),
-  })),
+  },
 }));
 
 import { handleCallbackQuery, handleEditReply, levenshtein } from '@/lib/bot/callbackHandler';
