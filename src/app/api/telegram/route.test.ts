@@ -1,3 +1,10 @@
+// Mock @supabase/supabase-js so callbackHandler.ts doesn't crash at module load
+jest.mock('@supabase/supabase-js', () => ({
+  createClient: jest.fn(() => ({
+    from: jest.fn(() => ({ update: jest.fn(() => ({ eq: jest.fn(() => Promise.resolve({ error: null })) })) })),
+  })),
+}));
+
 import { NextRequest } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { bot } from '@/lib/telegram';
