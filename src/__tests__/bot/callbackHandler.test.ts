@@ -1,10 +1,7 @@
 // Bot Engineer Agent — Slice 5 (Issue #6)
-// TDD: tests written BEFORE feature code — callbackHandler unit tests
+// TDD: callbackHandler unit tests
 
-import { handleCallbackQuery, handleEditReply, levenshtein } from '@/lib/bot/callbackHandler';
-import { createClient } from '@supabase/supabase-js';
-
-// Mock Supabase
+// Mock Supabase BEFORE any imports that use it
 jest.mock('@supabase/supabase-js', () => ({
   createClient: jest.fn(() => ({
     from: jest.fn(() => ({
@@ -14,6 +11,8 @@ jest.mock('@supabase/supabase-js', () => ({
     })),
   })),
 }));
+
+import { handleCallbackQuery, handleEditReply, levenshtein } from '@/lib/bot/callbackHandler';
 
 function makeCallbackCtx(data: string) {
   return {
@@ -26,25 +25,25 @@ function makeCallbackCtx(data: string) {
 beforeEach(() => jest.clearAllMocks());
 
 describe('handleCallbackQuery', () => {
-  test('approve: updates draft and confirms', async () => {
+  test('approve: answers query and confirms', async () => {
     const ctx = makeCallbackCtx('approve:draft-uuid-123');
     await handleCallbackQuery(ctx);
     expect(ctx.answerCallbackQuery).toHaveBeenCalledTimes(1);
-    expect(ctx.reply).toHaveBeenCalledWith('✅ Got it! Response noted.');
+    expect(ctx.reply).toHaveBeenCalledWith('\u2705 Got it! Response noted.');
   });
 
-  test('skip: updates draft and confirms', async () => {
+  test('skip: answers query and confirms', async () => {
     const ctx = makeCallbackCtx('skip:draft-uuid-456');
     await handleCallbackQuery(ctx);
     expect(ctx.answerCallbackQuery).toHaveBeenCalledTimes(1);
-    expect(ctx.reply).toHaveBeenCalledWith('⏭ Skipped. Moving on.');
+    expect(ctx.reply).toHaveBeenCalledWith('\u23ed Skipped. Moving on.');
   });
 
   test('edit: sets awaiting_edit state', async () => {
     const ctx = makeCallbackCtx('edit:draft-uuid-789');
     await handleCallbackQuery(ctx);
     expect(ctx.answerCallbackQuery).toHaveBeenCalledTimes(1);
-    expect(ctx.reply).toHaveBeenCalledWith("✏️ Send me your edited version.");
+    expect(ctx.reply).toHaveBeenCalledWith("\u270f\ufe0f Send me your edited version.");
   });
 
   test('unknown action: does not crash, replies error', async () => {
@@ -62,19 +61,19 @@ describe('handleCallbackQuery', () => {
 });
 
 describe('handleEditReply', () => {
-  test('saves final_text and non-zero edit_distance', async () => {
+  test('saves final_text and replies confirmation', async () => {
     const ctx = { reply: jest.fn().mockResolvedValue(undefined) } as any;
     await handleEditReply(ctx, 'draft-id', 'Hello world', 'Hello there');
-    expect(ctx.reply).toHaveBeenCalledWith('✅ Updated version saved.');
+    expect(ctx.reply).toHaveBeenCalledWith('\u2705 Updated version saved.');
+  });
+});
+
+describe('levenshtein', () => {
+  test('identical strings return 0', () => {
+    expect(levenshtein('same text', 'same text')).toBe(0);
   });
 
-  test('edit_distance is 0 for identical text', async () => {
-    const dist = levenshtein('same text', 'same text');
-    expect(dist).toBe(0);
-  });
-
-  test('edit_distance is correct for simple change', async () => {
-    const dist = levenshtein('cat', 'cut');
-    expect(dist).toBe(1);
+  test('single char change returns 1', () => {
+    expect(levenshtein('cat', 'cut')).toBe(1);
   });
 });
