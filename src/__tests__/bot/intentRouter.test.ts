@@ -1,26 +1,30 @@
 // Bot Engineer Agent — Slice 5 (Issue #6)
 // TDD: intentRouter unit tests
 
-const mockCreate = jest.fn();
-
+// mockCreate lives inside the factory so it's defined when Jest hoists this block
 jest.mock('@anthropic-ai/sdk', () => {
-  return {
-    __esModule: true,
-    default: jest.fn().mockImplementation(() => ({
-      messages: { create: mockCreate },
-    })),
-  };
+  const mockCreate = jest.fn();
+  const MockAnthropic = jest.fn().mockImplementation(() => ({
+    messages: { create: mockCreate },
+  }));
+  // Attach mockCreate to constructor so tests can access it
+  (MockAnthropic as any).__mockCreate = mockCreate;
+  return { __esModule: true, default: MockAnthropic };
 });
 
+import Anthropic from '@anthropic-ai/sdk';
 import { routeIntent } from '@/lib/bot/intentRouter';
 
+// Helper to get the shared mockCreate reference
+const getMockCreate = () => (Anthropic as any).__mockCreate as jest.Mock;
+
 function mockHaiku(intent: string) {
-  mockCreate.mockResolvedValue({
+  getMockCreate().mockResolvedValue({
     content: [{ type: 'text', text: intent }],
   });
 }
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => getMockCreate().mockClear());
 
 describe('routeIntent', () => {
   test('routes "yes" to approve', async () => {
@@ -71,7 +75,7 @@ describe('routeIntent', () => {
   test('Haiku called with correct model', async () => {
     mockHaiku('approve');
     await routeIntent('ok');
-    expect(mockCreate).toHaveBeenCalledWith(
+    expect(getMockCreate()).toHaveBeenCalledWith(
       expect.objectContaining({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 10,
